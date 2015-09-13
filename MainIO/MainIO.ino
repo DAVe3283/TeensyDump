@@ -1,8 +1,11 @@
 // -----------------------------------------------------------------------------
 // MainIO.ino
 //
-// Program to do the main I/O on the Intel 28F400 FLASH chip.
+// Program to do the main I/O on the Intel 28F400BX FLASH chip.
 // Talks over serial to set addresse bits (see SerialAddress.ino).
+//
+// IMPORTANT: Set the Teensy to 96 MHz (overclock) to use 6MHz serial.
+// If you don't want to overclock, lower the serial baud to 3MHz or lower.
 //
 // Be sure to wire the 28F400 into x8 mode (BYTE# pin tied to ground), since
 // that is how the program is currently setup.
@@ -68,6 +71,9 @@ const uint8_t cmd_IntelligentID(0x90);
 // Declarations
 // -----------------------------------------------------------------------------
 
+// Verify we have an Intel 28F400BX chip (true is success)
+bool VerifyIntel28F400();
+
 // Switch mode on DQ pins (are used for both INPUT and OUTPUT)
 void ConfigureDQMode(uint8_t mode);
 
@@ -80,11 +86,22 @@ void SetDQs(const uint8_t& data);
 // Get data on DQ pins
 uint8_t GetDQs();
 
-// Flash Routines
+// Prepare chip for R/W operations
+void flash_Ready();
+
+// Put chip into standby
 void flash_Standby();
+
+// Deep power down for maximum power savings
 void flash_DeepPowerDown();
+
+// Write data to the chip (assumes address is already set)
 void flash_Write(const uint8_t& data);
+
+// Read data from the chip (assumes address is already set)
 uint8_t flash_Read();
+
+// Read the manufacturer (addr=0) or device (addr=2) ID from the chip
 uint8_t flash_IntelligentID(const uint32_t& addr);
 
 
@@ -118,8 +135,8 @@ void setup()
   flash_Standby();
 
   // Configure serial
-  usb.begin(115200);
-  ser.begin(115200);
+  usb.begin(9600); // USB is always full speed, this baud does nothing
+  ser.begin(6000000);
 }
 
 // Main program loop
@@ -133,14 +150,7 @@ void loop()
     switch (incomingByte)
     {
     case('.'):
-      {
-        usb.print("Reading Manufacturer ID: ");
-        uint8_t id = flash_IntelligentID(0);
-        usb.println(id, HEX);
-        usb.print("Reading Device ID: ");
-        id = flash_IntelligentID(2);
-        usb.println(id, HEX);
-      }
+      VerifyIntel28F400();
       break;
 
     // Hex input
@@ -195,6 +205,51 @@ void loop()
   }
 }
 
+bool VerifyIntel28F400()
+{
+  bool fail(false);
+
+  // Manufacturer ID is at A0=0 (addr=0)
+  uint8_t id(flash_IntelligentID(0));
+  usb.printf("Got Manufacturer ID = 0x%02X (", id);
+  if (id == 0x89)
+  {
+    usb.print("Intel");
+  }
+  else
+  {
+    usb.print("Unknown/Bad");
+    fail = true;
+  }
+  usb.println(")");
+
+  // Device ID is at A0=1 (addr=2 in X8 mode)
+  id = flash_IntelligentID(2);
+  usb.printf("Got Device ID = 0x%02X (", id);
+  if (!fail && id == 0x70)
+  {
+    usb.print("28F400BX-T");
+  }
+  else if (!fail && id == 0x71)
+  {
+    usb.print("28F400BX-B");
+  }
+  else
+  {
+    usb.print("Unknown/Bad");
+    fail = true;
+  }
+  usb.println(")");
+
+  if (fail)
+  {
+    usb.println("Please check chip is an Intel 28F400BX, that it is socketed correctly, and that the wiring is correct.");
+  }
+
+  // Did we get a 28F400BX?
+  return !fail;
+}
+
 void ConfigureDQMode(uint8_t mode)
 {
   for (int_fast8_t i(0); i < num_DQs; ++i)
@@ -239,12 +294,23 @@ uint8_t GetDQs()
   return data;
 }
 
+void flash_Ready()
+{
+  digitalWrite(pin_RP_, HIGH);
+  digitalWrite(pin_OE_, HIGH);
+  digitalWrite(pin_WE_, HIGH);
+  digitalWrite(pin_CE_, LOW);
+  // Address is a don't care
+  // DQ pins go High-Z
+  delayMicroseconds(1); // Only takes 0.3 for chip to stabilize, but this is the best we can do
+}
+
 void flash_Standby()
 {
   digitalWrite(pin_RP_, HIGH);
   digitalWrite(pin_CE_, HIGH);
-  // OE# is a don't care
-  // WE# is a don't care
+  digitalWrite(pin_OE_, HIGH); // OE# is a don't care
+  digitalWrite(pin_WE_, HIGH); // WE# is a don't care
   // Address is a don't care
   // DQ pins go High-Z
 }
@@ -252,9 +318,9 @@ void flash_Standby()
 void flash_DeepPowerDown()
 {
   digitalWrite(pin_RP_, LOW);
-  // CE# is a don't care
-  // OE# is a don't care
-  // WE# is a don't care
+  digitalWrite(pin_CE_, HIGH); // CE# is a don't care
+  digitalWrite(pin_OE_, HIGH); // OE# is a don't care
+  digitalWrite(pin_WE_, HIGH); // WE# is a don't care
   // Address is a don't care
   // DQ pins go High-Z
 }
@@ -263,45 +329,37 @@ void flash_Write(const uint8_t& data)
 {
   // Assume address is set and stable
   SetDQs(data);
-  digitalWrite(pin_CE_, LOW); // Enable the chip
   digitalWrite(pin_WE_, LOW); // Begin a write
   delayMicroseconds(1); // Only need 0.02, but this is the best we can do
   digitalWrite(pin_WE_, HIGH); // End write, latch command
   delayMicroseconds(1); // Only need 0.01, but this is the best we can do
-  digitalWrite(pin_CE_, HIGH); // Disable the chip
 }
 
 uint8_t flash_Read()
 {
   // Assume address is set and stable
-  digitalWrite(pin_CE_, LOW); // Enable the chip
   digitalWrite(pin_OE_, LOW); // Chip output on
   delayMicroseconds(1); // Only need 0.04, but this is the best we can do
   uint8_t data(GetDQs());
   digitalWrite(pin_OE_, HIGH); // Chip output off
-  digitalWrite(pin_CE_, HIGH); // Disable the chip
   return data;
 }
 
 uint8_t flash_IntelligentID(const uint32_t& addr)
 {
-  // Read the Intelligent ID
-  // Addr only cares about A0, which in x8 mode, might be bit 1.
-  // So try addr=1, but it might need 2 to work
-
-  // Initial chip setup
-  digitalWrite(pin_RP_, HIGH); // Not in reset
-  digitalWrite(pin_CE_, HIGH); // Disable the chip
-  digitalWrite(pin_OE_, HIGH); // Chip output off
-  digitalWrite(pin_WE_, HIGH); // Not writing
-  delayMicroseconds(1); // Only takes 0.3 for chip to stabilize, but this is the best we can do
+  // Prepare to use the chip
+  flash_Ready();
 
   // First Cycle (write cmd_IntelligentID)
   // Address is don't care
   flash_Write(cmd_IntelligentID);
 
   // Second Cycle (read the ID)
-  //ConfigureDQMode(INPUT);
   SetAddress(addr);
-  return flash_Read();
+  const uint8_t id(flash_Read());
+
+  // Put chip back into standby
+  flash_Standby();
+
+  return id;
 }

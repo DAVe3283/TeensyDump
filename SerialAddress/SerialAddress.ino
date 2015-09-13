@@ -3,6 +3,9 @@
 //
 // A program to take a serial input of the address, and put it out on hardware
 // pins.
+//
+// IMPORTANT: Set the Teensy to 96 MHz (overclock) to use 6MHz serial.
+// If you don't want to overclock, lower the serial baud to 3MHz or lower.
 // -----------------------------------------------------------------------------
 
 
@@ -70,8 +73,8 @@ void setup()
   }
 
   // Configure serial
-  usb.begin(9600);
-  ser.begin(115200);
+  usb.begin(9600); // USB is always full speed, this baud does nothing
+  ser.begin(6000000);
 }
 
 // Main program loop
