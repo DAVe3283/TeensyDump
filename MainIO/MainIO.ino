@@ -74,6 +74,19 @@ const uint8_t cmd_IntelligentID(0x90);
 // Verify we have an Intel 28F400BX chip (true is success)
 bool VerifyIntel28F400();
 
+// Decode Status Register
+void DecodeStatusRegister();
+void DecodeStatusRegister(const uint8_t& status);
+
+// Dump an address range
+void Dump(const uint32_t& startAddress, const uint32_t& stopAddress);
+
+// Time how long the dump takes, ignoring print statements
+void DumpTime(const uint32_t& startAddress, const uint32_t& stopAddress);
+
+// Print the data at the specified address
+void PrintData(const uint32_t& addr);
+
 // Switch mode on DQ pins (are used for both INPUT and OUTPUT)
 void ConfigureDQMode(uint8_t mode);
 
@@ -98,11 +111,19 @@ void flash_DeepPowerDown();
 // Write data to the chip (assumes address is already set)
 void flash_Write(const uint8_t& data);
 
-// Read data from the chip (assumes address is already set)
-uint8_t flash_Read();
+// Read data from the chip
+uint8_t flash_Read(const uint32_t& addr); // Assumes chip is ready
+uint8_t flash_Read(); // Assumes address is already set and chip is ready
+
+// Put the chip into read array mode
+void flash_ReadArrayMode();
 
 // Read the manufacturer (addr=0) or device (addr=2) ID from the chip
 uint8_t flash_IntelligentID(const uint32_t& addr);
+
+// Status register functions
+uint8_t flash_ReadStatusRegister();
+void flash_ClearStatusRegister();
 
 
 // -----------------------------------------------------------------------------
@@ -151,47 +172,75 @@ void loop()
     {
     case('.'):
       VerifyIntel28F400();
+      flash_ReadArrayMode();
+      break;
+
+    case('-'):
+      flash_ReadArrayMode();
+      break;
+
+    case('+'):
+      DecodeStatusRegister();
+      flash_ReadArrayMode();
+      break;
+
+    // Dump all
+    case('A'):
+    case('a'):
+      Dump(0x0, 0x7FFFF);
+      break;
+
+    // Dump boot block
+    case('B'):
+    case('b'):
+      Dump(0x0, 0x3FFF);
+      break;
+
+    // Time whole dump, ignoring print times
+    case('T'):
+    case('t'):
+      DumpTime(0x0,0x7FFFF);
       break;
 
     // Hex input
     case('0'):
-      SetAddress(0x0, true);
+      PrintData(0x0);
       break;
 
     case('1'):
-      SetAddress(0x1, true);
+      PrintData(0x1);
       break;
 
     case('2'):
-      SetAddress(0xF, true);
+      PrintData(0x2);
       break;
 
     case('3'):
-      SetAddress(0x10, true);
+      PrintData(0x3);
       break;
 
     case('4'):
-      SetAddress(0x21, true);
+      PrintData(0x21);
       break;
 
     case('5'):
-      SetAddress(0x40, true);
+      PrintData(0x40);
       break;
 
     case('6'):
-      SetAddress(0x81, true);
+      PrintData(0x81);
       break;
 
     case('7'):
-      SetAddress(0xF0, true);
+      PrintData(0xF0);
       break;
 
     case('8'):
-      SetAddress(0xF1, true);
+      PrintData(0xF1);
       break;
 
     case('9'):
-      SetAddress(0xFE, true);
+      PrintData(0xFE);
       break;
 
     default:
@@ -250,6 +299,118 @@ bool VerifyIntel28F400()
   return !fail;
 }
 
+void DecodeStatusRegister()
+{
+  DecodeStatusRegister(flash_ReadStatusRegister());
+}
+
+void DecodeStatusRegister(const uint8_t& status)
+{
+  usb.printf("Decoding Status Register: 0x%02X (0b", status);
+  usb.print(status, BIN);
+  usb.println(")");
+
+  // Bit 7
+  usb.print("SR[7] Write State Machine Status: ");
+  if (status & (1 << 7))
+  {
+    usb.println("1 Ready");
+  }
+  else
+  {
+    usb.println("0 Busy");
+  }
+
+  // Bit 6
+  usb.print("SR[6] Erase Suspend Status: ");
+  if (status & (1 << 6))
+  {
+    usb.println("1 Erase Suspended");
+  }
+  else
+  {
+    usb.println("0 Erase in Progress/Completed");
+  }
+
+  // Bit 5
+  usb.print("SR[5] Erase Status: ");
+  if (status & (1 << 5))
+  {
+    usb.println("1 Error in Block Erase");
+  }
+  else
+  {
+    usb.println("0 Successful Block Erase");
+  }
+
+  // Bit 4
+  usb.print("SR[4] Program Status: ");
+  if (status & (1 << 4))
+  {
+    usb.println("1 Error in Byte/Word Program");
+  }
+  else
+  {
+    usb.println("0 Successful Byte/Word Program");
+  }
+
+  // Bit 3
+  usb.print("SR[3] Vpp Status: ");
+  if (status & (1 << 3))
+  {
+    usb.println("1 Vpp Low Detect; Operation Abort");
+  }
+  else
+  {
+    usb.println("0 Vpp OK");
+  }
+
+  // Bit 2
+  usb.printf("SR[2:0] Reserved: %d%d%d",
+    status & (1 << 2),
+    status & (1 << 1),
+    status & (1 << 0));
+  usb.println();
+}
+
+void Dump(const uint32_t& startAddress, const uint32_t& stopAddress)
+{
+  usb.println();
+  usb.printf("Dumping data from 0x%05X to 0x%05X.", startAddress, stopAddress);
+  usb.println();
+  usb.println();
+  for (uint32_t address(startAddress); address <= stopAddress; ++address)
+  {
+    usb.printf("%02X", flash_Read(address));
+  }
+  usb.println();
+  usb.println();
+  usb.println("Dump complete.");
+}
+
+void DumpTime(const uint32_t& startAddress, const uint32_t& stopAddress)
+{
+  usb.println();
+  usb.printf("Timing dump of data from 0x%05X to 0x%05X.", startAddress, stopAddress);
+  usb.println();
+  const uint32_t start(millis());
+  for (uint32_t address(startAddress); address <= stopAddress; ++address)
+  {
+    flash_Read(address);
+  }
+  const uint32_t totalMillis(millis() - start);
+  usb.print("Dump took ");
+  usb.print(totalMillis, DEC);
+  usb.println(" ms.");
+}
+
+void PrintData(const uint32_t& addr)
+{
+  const uint8_t data(flash_Read(addr));
+  usb.printf("0x%05X: 0x%02X", addr, data);
+  usb.println();
+}
+
 void ConfigureDQMode(uint8_t mode)
 {
   for (int_fast8_t i(0); i < num_DQs; ++i)
@@ -269,6 +430,7 @@ void SetAddress(const uint32_t& addr, const bool& printAddress)
 
   // Wait for confirmation
   ser.print('\r');
+  ser.flush();
   while (ser.read() != '\n') {};
 }
 
@@ -285,6 +447,8 @@ void SetDQs(const uint8_t& data)
 
 uint8_t GetDQs()
 {
+  // ConfigureDQMode(INPUT_PULLUP);
+  // delayMicroseconds(10); // Per https://www.pjrc.com/teensy/td_digital.html
   ConfigureDQMode(INPUT);
   uint8_t data(0);
   for (int_fast8_t i(0); i < num_DQs; ++i)
@@ -335,14 +499,33 @@ void flash_Write(const uint8_t& data)
   delayMicroseconds(1); // Only need 0.01, but this is the best we can do
 }
 
+uint8_t flash_Read(const uint32_t& addr)
+{
+  // CE# must be high while setting the address (apparently)
+  digitalWrite(pin_CE_, HIGH);
+  SetAddress(addr);
+
+  // Read the data
+  return flash_Read();
+}
+
 uint8_t flash_Read()
 {
-  // Assume address is set and stable
+  // Assume address is set and stable, chip is disabled
+  digitalWrite(pin_CE_, LOW); // Enable chip, latch addresses
   digitalWrite(pin_OE_, LOW); // Chip output on
-  delayMicroseconds(1); // Only need 0.04, but this is the best we can do
+  delayMicroseconds(1); // Only need 80 ns from CE# going low / 40 ns from OE# going low, but this is the best we can do
   uint8_t data(GetDQs());
   digitalWrite(pin_OE_, HIGH); // Chip output off
+  digitalWrite(pin_CE_, HIGH); // Disable chip
   return data;
+}
+
+void flash_ReadArrayMode()
+{
+  flash_Ready();
+  flash_Write(cmd_ReadArray);
+  flash_Standby();
 }
 
 uint8_t flash_IntelligentID(const uint32_t& addr)
@@ -362,4 +545,29 @@ uint8_t flash_IntelligentID(const uint32_t& addr)
   flash_Standby();
 
   return id;
+}
+
+uint8_t flash_ReadStatusRegister()
+{
+  flash_Ready();
+
+  // First Cycle (write cmd_ReadStatusRegister)
+  // Address is don't care
+  flash_Write(cmd_ReadStatusRegister);
+
+  // Second Cycle (read the register)
+  // Address is don't care
+  const uint8_t status(flash_Read());
+
+  // Put chip back into standby
+  flash_Standby();
+
+  return status;
+}
+
+void flash_ClearStatusRegister()
+{
+  flash_Ready();
+  flash_Write(cmd_ClearStatusRegister);
+  flash_Standby();
 }
