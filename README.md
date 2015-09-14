@@ -15,9 +15,9 @@ to the pads on the back. Not the most breadboard friendly.
 
 ### Isn't this slow?
 
-Probably. Sending the address over serial to the other Teensy is by far the
-longest part of the operation. I might tweak the way I deal with that later if
-an actual dump takes longer than I want.
+Not as slow as you'd think. I set the Teensys to use 6,000,000 baud for serial,
+which works pretty well. You do have to overclock them to 96 MHz for that to
+work right.
 
 ## Schematics
 

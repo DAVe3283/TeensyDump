@@ -55,6 +55,9 @@ const uint8_t pin_OE_(8);
 const uint8_t pin_RP_(19);
 const uint8_t pin_WE_(18);
 
+// LED
+const uint8_t pin_LED(13);
+
 // Commands
 const uint8_t cmd_ReadArray(0xFF);
 const uint8_t cmd_ProgramSetup(0x40); // 0x10 is also valid
@@ -81,9 +84,6 @@ void DecodeStatusRegister(const uint8_t& status);
 // Dump an address range
 void Dump(const uint32_t& startAddress, const uint32_t& stopAddress);
 
-// Time how long the dump takes, ignoring print statements
-void DumpTime(const uint32_t& startAddress, const uint32_t& stopAddress);
-
 // Print the data at the specified address
 void PrintData(const uint32_t& addr);
 
@@ -99,8 +99,17 @@ void SetDQs(const uint8_t& data);
 // Get data on DQ pins
 uint8_t GetDQs();
 
-// Prepare chip for R/W operations
-void flash_Ready();
+// Read the array
+uint8_t ReadArray(const uint32_t& addr);
+
+// Write the array
+bool WriteArray(const uint32_t& addr, const uint8_t& data);
+
+// Erase a block in the array
+bool EraseArrayBlock(const uint32_t& addr);
+
+// Begin R/W operations (enables device, which latches address)
+void flash_Begin();
 
 // Put chip into standby
 void flash_Standby();
@@ -108,11 +117,13 @@ void flash_Standby();
 // Deep power down for maximum power savings
 void flash_DeepPowerDown();
 
-// Write data to the chip (assumes address is already set)
-void flash_Write(const uint8_t& data);
+// Latch an address into the part
+void flash_LatchAddress(const uint32_t& addr);
+
+// Write data to the chip
+void flash_Write(const uint8_t& data); // Assumes address is latched already
 
 // Read data from the chip
-uint8_t flash_Read(const uint32_t& addr); // Assumes chip is ready
 uint8_t flash_Read(); // Assumes address is already set and chip is ready
 
 // Put the chip into read array mode
@@ -125,6 +136,21 @@ uint8_t flash_IntelligentID(const uint32_t& addr);
 uint8_t flash_ReadStatusRegister();
 void flash_ClearStatusRegister();
 
+// Erase entire device
+void EraseAll();
+
+// Program entire device (or just a region)
+void ProgramAll();
+
+// Add a nibble to a value
+void AddNibble(uint32_t& value, const char& nibble);
+void AddNibble(uint8_t& value, const char& nibble);
+
+// Get an address, in hex, from USB
+bool usb_GetAddress(uint32_t& address);
+
+// Get a byte, in hex, from USB
+bool usb_GetData(uint8_t& data);
 
 // -----------------------------------------------------------------------------
 // Globals
@@ -158,6 +184,9 @@ void setup()
   // Configure serial
   usb.begin(9600); // USB is always full speed, this baud does nothing
   ser.begin(6000000);
+
+  // Enable LED
+  pinMode(pin_LED, OUTPUT);
 }
 
 // Main program loop
@@ -167,21 +196,34 @@ void loop()
   if (usb.available() > 0)
   {
     const char incomingByte(static_cast<char>(usb.read()));
-    
+
     switch (incomingByte)
     {
-    case('.'):
-      VerifyIntel28F400();
-      flash_ReadArrayMode();
+    case('`'):
+      ProgramAll();
       break;
 
-    case('-'):
+    case('.'):
+      VerifyIntel28F400();
+      break;
+
+    case('*'):
       flash_ReadArrayMode();
       break;
 
     case('+'):
       DecodeStatusRegister();
+      break;
+
+    case('-'):
+      flash_ClearStatusRegister();
       flash_ReadArrayMode();
+      break;
+
+    // Erase all
+    case('E'):
+    case('e'):
+      EraseAll();
       break;
 
     // Dump all
@@ -196,10 +238,68 @@ void loop()
       Dump(0x0, 0x3FFF);
       break;
 
-    // Time whole dump, ignoring print times
-    case('T'):
-    case('t'):
-      DumpTime(0x0,0x7FFFF);
+    case('Q'):
+    case('q'):
+      WriteArray(0x4000, 0x55);
+      break;
+
+    // Print parameter block
+    case('p'):
+      Dump(0x4000, 0x6000 - 1);
+      break;
+    // Write parameter block
+    case('['):
+      usb.print("Writing parameter block with sequential data...");
+      for (uint32_t addr(0x4000); addr < 0x6000; ++addr)
+      {
+        WriteArray(addr, addr % 0x100);
+      }
+      usb.println("done.");
+      break;
+    case('{'):
+      usb.print("Writing parameter block with 0x00...");
+      for (uint32_t addr(0x4000); addr < 0x6000; ++addr)
+      {
+        WriteArray(addr, 0x00);
+      }
+      usb.println("done.");
+      break;
+    case('P'):
+      usb.print("Writing parameter block with 0xA5...");
+      for (uint32_t addr(0x4000); addr < 0x6000; ++addr)
+      {
+        WriteArray(addr, 0xA5);
+      }
+      usb.println("done.");
+      break;
+    case('}'):
+      usb.print("Writing parameter block with 0xFF...");
+      for (uint32_t addr(0x4000); addr < 0x6000; ++addr)
+      {
+        WriteArray(addr, 0xFF);
+      }
+      usb.println("done.");
+      break;
+    // Erase parameter block
+    case(']'):
+      EraseArrayBlock(0x4000);
+      break;
+
+    // Print 96k block
+    case('L'):
+    case('l'):
+      Dump(0x8000, 0x20000 - 1);
+      break;
+    // Write 96k block
+    case(';'):
+      for (uint32_t addr(0x8000); addr < 0x20000; ++addr)
+      {
+        WriteArray(addr, addr % 0x100);
+      }
+      break;
+    // Erase 96k block
+    case('\''):
+      EraseArrayBlock(0x8000);
       break;
 
     // Hex input
@@ -220,7 +320,7 @@ void loop()
       break;
 
     case('4'):
-      PrintData(0x21);
+      PrintData(0x4000);
       break;
 
     case('5'):
@@ -302,6 +402,7 @@ bool VerifyIntel28F400()
 void DecodeStatusRegister()
 {
   DecodeStatusRegister(flash_ReadStatusRegister());
+  flash_ReadArrayMode(); // Back to read array mode
 }
 
 void DecodeStatusRegister(const uint8_t& status)
@@ -379,34 +480,22 @@ void Dump(const uint32_t& startAddress, const uint32_t& stopAddress)
   usb.printf("Dumping data from 0x%05X to 0x%05X.", startAddress, stopAddress);
   usb.println();
   usb.println();
-  for (uint32_t address(startAddress); address <= stopAddress; ++address)
-  {
-    usb.printf("%02X", flash_Read(address));
-  }
-  usb.println();
-  usb.println();
-  usb.println("Dump complete.");
-}
-
-void DumpTime(const uint32_t& startAddress, const uint32_t& stopAddress)
-{
-  usb.println();
-  usb.printf("Timing dump of data from 0x%05X to 0x%05X.", startAddress, stopAddress);
-  usb.println();
   const uint32_t start(millis());
   for (uint32_t address(startAddress); address <= stopAddress; ++address)
   {
-    flash_Read(address);
+    usb.printf("%02X", ReadArray(address));
   }
   const uint32_t totalMillis(millis() - start);
-  usb.print("Dump took ");
+  usb.println();
+  usb.println();
+  usb.print("Dump complete in ");
   usb.print(totalMillis, DEC);
   usb.println(" ms.");
 }
 
 void PrintData(const uint32_t& addr)
 {
-  const uint8_t data(flash_Read(addr));
+  const uint8_t data(ReadArray(addr));
   usb.printf("0x%05X: 0x%02X", addr, data);
   usb.println();
 }
@@ -430,7 +519,7 @@ void SetAddress(const uint32_t& addr, const bool& printAddress)
 
   // Wait for confirmation
   ser.print('\r');
-  ser.flush();
+  ser.flush(); // Send now!
   while (ser.read() != '\n') {};
 }
 
@@ -447,8 +536,6 @@ void SetDQs(const uint8_t& data)
 
 uint8_t GetDQs()
 {
-  // ConfigureDQMode(INPUT_PULLUP);
-  // delayMicroseconds(10); // Per https://www.pjrc.com/teensy/td_digital.html
   ConfigureDQMode(INPUT);
   uint8_t data(0);
   for (int_fast8_t i(0); i < num_DQs; ++i)
@@ -458,23 +545,117 @@ uint8_t GetDQs()
   return data;
 }
 
-void flash_Ready()
+uint8_t ReadArray(const uint32_t& addr)
 {
+  // Assume we are in array read mode
+  flash_LatchAddress(addr);
+  return flash_Read();
+}
+
+// Write the array
+bool WriteArray(const uint32_t& addr, const uint8_t& data)
+{
+  // Setup Program
+  flash_LatchAddress(addr);
+  flash_Write(cmd_ProgramSetup);
+
+  // Program
+  flash_Begin(); // Address hasn't changed, just latch
+  flash_Write(data);
+
+  // Wait for write to complete
+  //const uint32_t start(micros());
+  bool busy;
+  uint8_t status;
+  do
+  {
+    status = flash_ReadStatusRegister();
+    busy = (status & (1 << 7)) == 0;
+  } while (busy);
+  //const uint32_t totalMicros(micros() - start);
+  //usb.printf("Wrote 0x%02X to 0x%05X in %ld us", data, addr, totalMicros);
+  //usb.println();
+
+  // Exit programming mode
+  flash_ReadArrayMode();
+
+  // Errors?
+  const uint8_t errors(status & 0x78);
+  if (errors != 0)
+  {
+    usb.println("Error writing array!");
+    DecodeStatusRegister(status);
+  }
+  return errors == 0;
+}
+
+bool EraseArrayBlock(const uint32_t& addr)
+{
+  // Setup Erase
+  flash_LatchAddress(addr);
+  flash_Write(cmd_EraseSetup);
+
+  // Erase
+  flash_Begin(); // Address hasn't changed, just latch
+  flash_Write(cmd_EraseConfirm);
+
+  // Wait for erase to complete
+  usb.printf("Erasing block containing address 0x%05X...", addr);
+  const uint32_t start(millis());
+  bool busy;
+  uint8_t status;
+  do
+  {
+    status = flash_ReadStatusRegister();
+    busy = (status & (1 << 7)) == 0;
+  } while (busy);
+  const uint32_t totalMillis(millis() - start);
+  usb.printf("done in %ld ms.", totalMillis);
+  usb.println();
+
+  // Exit erase mode
+  flash_ReadArrayMode();
+
+  // Errors?
+  const uint8_t errors(status & 0x78);
+  if (errors != 0)
+  {
+    usb.print("Error erasing array! ");
+    DecodeStatusRegister(status);
+  }
+  return errors == 0;
+}
+
+void flash_Begin()
+{
+  // Not in Deep Power Down
   digitalWrite(pin_RP_, HIGH);
+
+  // Put DQs in High-Z
   digitalWrite(pin_OE_, HIGH);
   digitalWrite(pin_WE_, HIGH);
+
+  // Latch address, enable chip for R/W
   digitalWrite(pin_CE_, LOW);
-  // Address is a don't care
-  // DQ pins go High-Z
-  delayMicroseconds(1); // Only takes 0.3 for chip to stabilize, but this is the best we can do
+  digitalWrite(pin_LED, HIGH);
+
+  // Let chip stabilize
+  delayMicroseconds(1); // Can take up to 300 ns, but we have to wait 1000 ns
 }
 
 void flash_Standby()
 {
+  // Not in Deep Power Down
   digitalWrite(pin_RP_, HIGH);
+
+  // Disable the device
   digitalWrite(pin_CE_, HIGH);
-  digitalWrite(pin_OE_, HIGH); // OE# is a don't care
-  digitalWrite(pin_WE_, HIGH); // WE# is a don't care
+  digitalWrite(pin_LED, LOW);
+
+  // These are don't care, but set them up for later anyway
+  //digitalWrite(pin_OE_, HIGH); // OE# is a don't care
+  //digitalWrite(pin_WE_, HIGH); // WE# is a don't care
+
   // Address is a don't care
   // DQ pins go High-Z
 }
@@ -483,91 +664,430 @@ void flash_DeepPowerDown()
 {
   digitalWrite(pin_RP_, LOW);
   digitalWrite(pin_CE_, HIGH); // CE# is a don't care
+  digitalWrite(pin_LED, LOW);
   digitalWrite(pin_OE_, HIGH); // OE# is a don't care
   digitalWrite(pin_WE_, HIGH); // WE# is a don't care
   // Address is a don't care
   // DQ pins go High-Z
 }
 
+void flash_LatchAddress(const uint32_t& addr)
+{
+  flash_Standby();
+  SetAddress(addr);
+  flash_Begin();
+}
+
 void flash_Write(const uint8_t& data)
 {
-  // Assume address is set and stable
+  // Assume address is latched already
+
+  // Prepare DQs
   SetDQs(data);
+
+  // Write 
   digitalWrite(pin_WE_, LOW); // Begin a write
   delayMicroseconds(1); // Only need 0.02, but this is the best we can do
   digitalWrite(pin_WE_, HIGH); // End write, latch command
-  delayMicroseconds(1); // Only need 0.01, but this is the best we can do
-}
+  delayMicroseconds(1); // Only need 10ns, but this is the best we can do
 
-uint8_t flash_Read(const uint32_t& addr)
-{
-  // CE# must be high while setting the address (apparently)
-  digitalWrite(pin_CE_, HIGH);
-  SetAddress(addr);
-
-  // Read the data
-  return flash_Read();
+  // Return part to standby
+  flash_Standby();
 }
 
 uint8_t flash_Read()
 {
-  // Assume address is set and stable, chip is disabled
-  digitalWrite(pin_CE_, LOW); // Enable chip, latch addresses
+  // Assume address is latched already
+
+  // Read
   digitalWrite(pin_OE_, LOW); // Chip output on
   delayMicroseconds(1); // Only need 80 ns from CE# going low / 40 ns from OE# going low, but this is the best we can do
+  // TODO: smaller delay somehow?
   uint8_t data(GetDQs());
   digitalWrite(pin_OE_, HIGH); // Chip output off
-  digitalWrite(pin_CE_, HIGH); // Disable chip
+
+  // Return part to standby
+  flash_Standby();
+
+  // Return data
   return data;
 }
 
 void flash_ReadArrayMode()
 {
-  flash_Ready();
+  // Address is don't care
+  flash_Begin(); // Enable chip, latch the don't care address
   flash_Write(cmd_ReadArray);
-  flash_Standby();
+  flash_Standby(); // Return to standby
 }
 
 uint8_t flash_IntelligentID(const uint32_t& addr)
 {
-  // Prepare to use the chip
-  flash_Ready();
-
   // First Cycle (write cmd_IntelligentID)
   // Address is don't care
+  flash_Begin(); // latch don't care address
   flash_Write(cmd_IntelligentID);
 
   // Second Cycle (read the ID)
-  SetAddress(addr);
-  const uint8_t id(flash_Read());
+  const uint8_t id(ReadArray(addr));
 
-  // Put chip back into standby
-  flash_Standby();
+  // Put the part back into array read mode
+  flash_Begin(); // latch don't care address
+  flash_Write(cmd_ReadArray);
 
   return id;
 }
 
 uint8_t flash_ReadStatusRegister()
 {
-  flash_Ready();
-
   // First Cycle (write cmd_ReadStatusRegister)
   // Address is don't care
+  flash_Begin(); // latch don't care address
   flash_Write(cmd_ReadStatusRegister);
 
   // Second Cycle (read the register)
   // Address is don't care
-  const uint8_t status(flash_Read());
-
-  // Put chip back into standby
-  flash_Standby();
+  flash_Begin(); // latch don't care address
+  const uint8_t& status(flash_Read());
 
   return status;
 }
 
 void flash_ClearStatusRegister()
 {
-  flash_Ready();
+  flash_Begin();
   flash_Write(cmd_ClearStatusRegister);
-  flash_Standby();
+}
+
+void EraseAll()
+{
+  usb.print("Are you sure you want to erase the entire flash array? (Y,[N]) ");
+  while (usb.available() == 0)
+  {
+    delay(1);
+  }
+  char consent(usb.read());
+  usb.println(consent);
+  if ((consent != 'Y') && (consent != 'y'))
+  {
+    usb.println("Canceled erase.");
+    return;
+  }
+
+  // Verify we have an Intel 28F400
+  bool canHasIntel(VerifyIntel28F400());
+  if (!canHasIntel)
+  {
+    usb.println("I don't know how to erase this device. Canceled erase.");
+    return;
+  }
+
+  // Determine block locations
+  usb.print("Is the device a -T or -B? (T,B) ");
+  while (usb.available() == 0)
+  {
+    delay(1);
+  }
+  char topBottom(usb.read());
+  usb.println(topBottom);
+  if ((topBottom == 'T') || (topBottom == 't')) // Top boot block
+  {
+    usb.println("Erasing MAIN BLOCK 1...");
+    if (!EraseArrayBlock(0x00000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing MAIN BLOCK 2...");
+    if (!EraseArrayBlock(0x20000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing MAIN BLOCK 3...");
+    if (!EraseArrayBlock(0x40000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing MAIN BLOCK 4...");
+    if (!EraseArrayBlock(0x60000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing PARAMETER BLOCK 1...");
+    if (!EraseArrayBlock(0x78000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing PARAMETER BLOCK 2...");
+    if (!EraseArrayBlock(0x7A000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing BOOT BLOCK...");
+    digitalWrite(pin_WP_, HIGH); // Un-protect boot block
+    if (!EraseArrayBlock(0x7C000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+  }
+  else if ((topBottom == 'B') || (topBottom == 'b')) // Bottom boot block
+  {
+    usb.println("Erasing BOOT BLOCK...");
+    digitalWrite(pin_WP_, HIGH); // Un-protect boot block
+    if (!EraseArrayBlock(0x00000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing PARAMETER BLOCK 1...");
+    if (!EraseArrayBlock(0x04000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing PARAMETER BLOCK 2...");
+    if (!EraseArrayBlock(0x06000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing MAIN BLOCK 1...");
+    if (!EraseArrayBlock(0x08000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing MAIN BLOCK 2...");
+    if (!EraseArrayBlock(0x20000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing MAIN BLOCK 3...");
+    if (!EraseArrayBlock(0x40000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+    usb.println("Erasing MAIN BLOCK 4...");
+    if (!EraseArrayBlock(0x60000))
+    {
+      usb.println("Erase failed!");
+      return;
+    }
+  }
+  else
+  {
+    usb.println("Could not determine if you said T or B. Canceled erase.");
+    return;
+  }
+
+  usb.println("Erase complete!");
+}
+
+void ProgramAll()
+{
+  // For the record, this it a kludge, and doesn't seem all that stable.
+  // It DOES work though...
+  // TODO: not this
+
+  // Get start address
+  uint32_t address;
+  if (!usb_GetAddress(address))
+  {
+    usb.println("Programming canceled.");
+    return;
+  }
+
+  // Status
+  usb.printf("Ready to program array, starting at address 0x%05X.", address);
+  usb.println();
+  usb.println("Paste in hex data with spaces and/or enters between each byte.");
+
+  // Program the data
+  uint8_t data;
+  while (usb_GetData(data))
+  {
+    WriteArray(address++, data);
+  }
+
+  // TODO: done?
+  usb.println();
+  usb.println("Programming completed.");
+}
+
+void AddNibble(uint32_t& value, const char& nibble)
+{
+  // Got a new nibble (0-F hex)!
+  value <<= 4;
+  value += (nibble & 0xF);
+}
+void AddNibble(uint8_t& value, const char& nibble)
+{
+  // Got a new nibble (0-F hex)!
+  value <<= 4;
+  value += (nibble & 0xF);
+}
+
+bool usb_GetAddress(uint32_t& address)
+{
+  address = 0;
+  usb.print("Enter address to begin writing (in hex): 0x");
+  while (true)
+  {
+    if (usb.available())
+    {
+      const char input(usb.read());
+      switch (input)
+      {
+      // Hex input
+      case('0'):
+      case('1'):
+      case('2'):
+      case('3'):
+      case('4'):
+      case('5'):
+      case('6'):
+      case('7'):
+      case('8'):
+      case('9'):
+        usb.print(input);
+        AddNibble(address, input - '0');
+        break;
+      case('A'):
+      case('B'):
+      case('C'):
+      case('D'):
+      case('E'):
+      case('F'):
+        usb.print(input);
+        AddNibble(address, input - 'A' + 10);
+        break;
+      case('a'):
+      case('b'):
+      case('c'):
+      case('d'):
+      case('e'):
+      case('f'):
+        usb.print(input);
+        AddNibble(address, input - 'a' + 10);
+        break;
+
+      // Backspace / DEL
+      case('\b'):
+      case('\x7F'):
+        usb.print('\x7F');
+        address >>= 4; // remove last nibble
+        break;
+
+      // Enter
+      case('\r'):
+        usb.println();
+        return true;
+
+      // Escape
+      case('\x1B'):
+        usb.println();
+        return false;
+
+      default:
+        usb.println('\b');
+        usb.println("Unknown character entered! Enter hex digits only, or press Esc to cancel.");
+        usb.printf("You pressed keycode 0x%02X", input);
+        usb.println();
+        usb.print(address, HEX);
+        break;
+      }
+    }
+    else
+    {
+      delay(1);
+    }
+  }
+}
+
+bool usb_GetData(uint8_t& data)
+{
+  data = 0;
+  while (true)
+  {
+    if (usb.available())
+    {
+      const char input(usb.read());
+      switch (input)
+      {
+      // Hex input
+      case('0'):
+      case('1'):
+      case('2'):
+      case('3'):
+      case('4'):
+      case('5'):
+      case('6'):
+      case('7'):
+      case('8'):
+      case('9'):
+        usb.print(input);
+        AddNibble(data, input - '0');
+        break;
+      case('A'):
+      case('B'):
+      case('C'):
+      case('D'):
+      case('E'):
+      case('F'):
+        usb.print(input);
+        AddNibble(data, input - 'A' + 10);
+        break;
+      case('a'):
+      case('b'):
+      case('c'):
+      case('d'):
+      case('e'):
+      case('f'):
+        usb.print(input);
+        AddNibble(data, input - 'a' + 10);
+        break;
+
+      // Backspace / DEL
+      case('\b'):
+      case('\x7F'):
+        usb.print('\x7F');
+        data >>= 4; // remove last nibble
+        break;
+
+      // Enter
+      case('\r'):
+        usb.println();
+        return true;
+
+      // Space
+      case(' '):
+        return true;
+
+      // Escape
+      case('\x1B'):
+        usb.println();
+        return false;
+
+      default:
+        usb.println('\b');
+        usb.println("Unknown character entered! Enter hex digits only, or press Esc to cancel.");
+        usb.printf("You pressed keycode 0x%02X", input);
+        usb.println();
+        usb.print(data, HEX);
+        break;
+      }
+    }
+    else
+    {
+      delay(1);
+    }
+  }
 }
