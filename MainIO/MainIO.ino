@@ -25,6 +25,11 @@
 // Constants
 // -----------------------------------------------------------------------------
 
+// This is a X16 part. Should the values be treated as big-endian?
+// WARNING: If this is set to true, and the addresses dumped aren't multiples of
+//          2 (LSB = 1), then the first and last 16-bit values printed are junk.
+#define BIG_ENDIAN true
+
 // Data I/O pins
 const uint8_t num_DQs(8);
 const uint8_t pin_DQ0(2);
@@ -73,6 +78,9 @@ const uint8_t cmd_IntelligentID(0x90);
 // -----------------------------------------------------------------------------
 // Declarations
 // -----------------------------------------------------------------------------
+
+// Display usage / help
+void PrintUsage();
 
 // Verify we have an Intel 28F400BX chip (true is success)
 bool VerifyIntel28F400();
@@ -199,6 +207,14 @@ void loop()
 
     switch (incomingByte)
     {
+    case('H'):
+    case('h'):
+    case('?'):
+    case('\r'):
+    case('\n'):
+      PrintUsage();
+      break;
+
     case('`'):
       ProgramAll();
       break;
@@ -238,48 +254,17 @@ void loop()
       Dump(0x0, 0x3FFF);
       break;
 
-    case('Q'):
-    case('q'):
-      WriteArray(0x4000, 0x55);
+    // Erase boot block
+    case('['):
+      EraseArrayBlock(0x0);
       break;
 
     // Print parameter block
-    case('p'):
-      Dump(0x4000, 0x6000 - 1);
-      break;
-    // Write parameter block
-    case('['):
-      usb.print("Writing parameter block with sequential data...");
-      for (uint32_t addr(0x4000); addr < 0x6000; ++addr)
-      {
-        WriteArray(addr, addr % 0x100);
-      }
-      usb.println("done.");
-      break;
-    case('{'):
-      usb.print("Writing parameter block with 0x00...");
-      for (uint32_t addr(0x4000); addr < 0x6000; ++addr)
-      {
-        WriteArray(addr, 0x00);
-      }
-      usb.println("done.");
-      break;
     case('P'):
-      usb.print("Writing parameter block with 0xA5...");
-      for (uint32_t addr(0x4000); addr < 0x6000; ++addr)
-      {
-        WriteArray(addr, 0xA5);
-      }
-      usb.println("done.");
+    case('p'):
+      Dump(0x4000, 0x5FFF);
       break;
-    case('}'):
-      usb.print("Writing parameter block with 0xFF...");
-      for (uint32_t addr(0x4000); addr < 0x6000; ++addr)
-      {
-        WriteArray(addr, 0xFF);
-      }
-      usb.println("done.");
-      break;
+
     // Erase parameter block
     case(']'):
       EraseArrayBlock(0x4000);
@@ -288,60 +273,15 @@ void loop()
     // Print 96k block
     case('L'):
     case('l'):
-      Dump(0x8000, 0x20000 - 1);
+      Dump(0x8000, 0x1FFFF);
       break;
-    // Write 96k block
-    case(';'):
-      for (uint32_t addr(0x8000); addr < 0x20000; ++addr)
-      {
-        WriteArray(addr, addr % 0x100);
-      }
-      break;
+
     // Erase 96k block
     case('\''):
       EraseArrayBlock(0x8000);
       break;
 
-    // Hex input
-    case('0'):
-      PrintData(0x0);
-      break;
-
-    case('1'):
-      PrintData(0x1);
-      break;
-
-    case('2'):
-      PrintData(0x2);
-      break;
-
-    case('3'):
-      PrintData(0x3);
-      break;
-
-    case('4'):
-      PrintData(0x4000);
-      break;
-
-    case('5'):
-      PrintData(0x40);
-      break;
-
-    case('6'):
-      PrintData(0x81);
-      break;
-
-    case('7'):
-      PrintData(0xF0);
-      break;
-
-    case('8'):
-      PrintData(0xF1);
-      break;
-
-    case('9'):
-      PrintData(0xFE);
-      break;
+    // TODO: Other blocks?
 
     default:
       // Unknown input
@@ -352,6 +292,62 @@ void loop()
       break;
     }
   }
+}
+
+void PrintUsage()
+{
+  usb.print("\x1B" "c"); // Esc+c, clears the terminal
+  usb.println("TeensyDump - https://github.com/DAVe3283/TeensyDump");
+  usb.println();
+  #if BIG_ENDIAN
+  usb.println("Big-endian mode: dumps 16-bit big-endian values.");
+  #else // BIG_ENDIAN
+  usb.println("Little-endian mode: dumps bytes in order.");
+  #endif // BIG_ENDIAN
+  usb.println();
+  usb.println("Usage:");
+  usb.println();
+  usb.println("    . (period) - Verify Intel 28F400");
+  usb.println("        Verifies an Intel 28F400 chip is connected by reading manufacturer and");
+  usb.println("        device ID bytes.");
+  usb.println();
+  usb.println("    + (plus) - Read & Decode Status Register");
+  usb.println("        Reads, displays, and decodes (explains) the chip's status register.");
+  usb.println();
+  usb.println("    - (minus) - Clear Status Register");
+  usb.println("        Clears the chip's status register. Used to recover from an error, such");
+  usb.println("        as a failed write.");
+  usb.println();
+  usb.println("    * (asterisk) - Read Array Mode");
+  usb.println("        Puts the chip into read array mode. Should not be necessary to use.");
+  usb.println();
+  usb.println("    A - Dump All");
+  usb.println("        Dumps the entire 512KB chip (bytes 0x0 - 0x7FFFF).");
+  usb.println();
+  usb.println("    E - Erase All");
+  usb.println("        Erases the entire 512KB chip (bytes 0x0 - 0x7FFFF).");
+  usb.println();
+  usb.println("    B - Dump Boot Block");
+  usb.println("        Dumps the 16KB boot block (bytes 0x0 - 0x3FFF).");
+  usb.println();
+  usb.println("    [ - Erase Boot Block");
+  usb.println("        Erases the 16KB boot block (bytes 0x0 - 0x3FFF).");
+  usb.println();
+  usb.println("    P - Dump Parameter Block");
+  usb.println("        Dumps the 8KB parameter block (bytes 0x4000 - 0x5FFF).");
+  usb.println();
+  usb.println("    ] - Erase Parameter Block");
+  usb.println("        Erases the 8KB parameter block (bytes 0x4000 - 0x5FFF).");
+  usb.println();
+  usb.println("    L - Dump 96KB Block");
+  usb.println("        Dumps the 96KB main block (bytes 0x8000 - 0x1FFFF).");
+  usb.println();
+  usb.println("    \\ (backslash) - Erase 96KB Block");
+  usb.println("        Erases the 96KB main block (bytes 0x8000 - 0x1FFFF).");
+  usb.println();
+  usb.println("    ` (backtick) - Program All");
+  usb.println("        Programs (up to) the whole array with data pasted into the terminal.");
+  usb.println();
 }
 
 bool VerifyIntel28F400()
@@ -415,59 +411,59 @@ void DecodeStatusRegister(const uint8_t& status)
   usb.print("SR[7] Write State Machine Status: ");
   if (status & (1 << 7))
   {
-    usb.println("1 Ready");
+    usb.println("1 (Ready)");
   }
   else
   {
-    usb.println("0 Busy");
+    usb.println("0 (Busy)");
   }
 
   // Bit 6
-  usb.print("SR[6] Erase Suspend Status: ");
+  usb.print("SR[6] Erase Suspend Status:       ");
   if (status & (1 << 6))
   {
-    usb.println("1 Erase Suspended");
+    usb.println("1 (Erase Suspended)");
   }
   else
   {
-    usb.println("0 Erase in Progress/Completed");
+    usb.println("0 (Erase in Progress/Completed)");
   }
 
   // Bit 5
-  usb.print("SR[5] Erase Status: ");
+  usb.print("SR[5] Erase Status:               ");
   if (status & (1 << 5))
   {
-    usb.println("1 Error in Block Erase");
+    usb.println("1 (Error in Block Erase)");
   }
   else
   {
-    usb.println("0 Successful Block Erase");
+    usb.println("0 (Successful Block Erase)");
   }
 
   // Bit 4
-  usb.print("SR[4] Program Status: ");
+  usb.print("SR[4] Program Status:             ");
   if (status & (1 << 4))
   {
-    usb.println("1 Error in Byte/Word Program");
+    usb.println("1 (Error in Byte/Word Program)");
   }
   else
   {
-    usb.println("0 Successful Byte/Word Program");
+    usb.println("0 (Successful Byte/Word Program)");
   }
 
   // Bit 3
-  usb.print("SR[3] Vpp Status: ");
+  usb.print("SR[3] Vpp Status:                 ");
   if (status & (1 << 3))
   {
-    usb.println("1 Vpp Low Detect; Operation Abort");
+    usb.println("1 (Vpp Low Detect; Operation Abort)");
   }
   else
   {
-    usb.println("0 Vpp OK");
+    usb.println("0 (Vpp OK)");
   }
 
   // Bit 2
-  usb.printf("SR[2:0] Reserved: %d%d%d",
+  usb.printf("SR[2:0] Reserved:               %d%d%d",
     status & (1 << 2),
     status & (1 << 1),
     status & (1 << 0));
@@ -481,10 +477,35 @@ void Dump(const uint32_t& startAddress, const uint32_t& stopAddress)
   usb.println();
   usb.println();
   const uint32_t start(millis());
+  #if BIG_ENDIAN
+  uint8_t lowerByte(0);
+  uint8_t upperByte(0);
+  #endif // BIG_ENDIAN
   for (uint32_t address(startAddress); address <= stopAddress; ++address)
   {
+    #if BIG_ENDIAN
+    if ((address % 2) == 0)
+    {
+      // Read bits 0:7 of 16-bit value
+      lowerByte = ReadArray(address);
+    } else {
+      // Read bits 8:15 of 16-bit value
+      upperByte = ReadArray(address);
+
+      // Print current 16-bit value
+      usb.printf("%02X%02X", upperByte, lowerByte);
+    }
+    #else // BIG_ENDIAN
     usb.printf("%02X", ReadArray(address));
+    #endif // BIG_ENDIAN
   }
+  #if BIG_ENDIAN
+  if ((stopAddress % 2) == 0)
+  {
+    // We have to print the last value if we stopped on a odd address
+    usb.printf("%02X%02X", 0, lowerByte);
+  }
+  #endif // BIG_ENDIAN
   const uint32_t totalMillis(millis() - start);
   usb.println();
   usb.println();
@@ -909,6 +930,8 @@ void ProgramAll()
   usb.printf("Ready to program array, starting at address 0x%05X.", address);
   usb.println();
   usb.println("Paste in hex data with spaces and/or enters between each byte.");
+  usb.println("Press Escape when done.");
+  usb.println();
 
   // Program the data
   uint8_t data;
